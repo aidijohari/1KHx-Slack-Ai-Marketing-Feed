@@ -1,0 +1,31 @@
+{
+  "name": "1khx-slack-ai-marketing-feed",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "type": "module",
+  "license": "ISC",
+  "dependencies": {
+    "@extractus/article-extractor": "^8.0.20",
+    "@slack/web-api": "^7.11.0",
+    "axios": "^1.12.2",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.3",
+    "googleapis": "^164.1.0",
+    "html-to-text": "^9.0.5",
+    "luxon": "^3.7.2",
+    "node-cron": "^4.2.1",
+    "openai": "^6.6.0",
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.38.0",
+    "nodemon": "^3.1.10"
+  }
+}
