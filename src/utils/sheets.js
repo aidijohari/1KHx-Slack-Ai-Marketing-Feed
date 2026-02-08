@@ -107,15 +107,29 @@ export async function appendPostedArticles(articles) {
 
   if (!Array.isArray(articles) || articles.length === 0) return;
 
-  const rows = articles.map((article) =>
-    SHEET_COLUMNS.map((key) => {
-      const value = article[key];
-      if (key === "insights") {
-        return Array.isArray(value) ? value.join("\n") : value ?? "";
+  const seenUrls = new Set();
+  const rows = articles
+    .map((article) => {
+      const normalizedUrl = normalizeUrl(article.articleUrl);
+      if (normalizedUrl && seenUrls.has(normalizedUrl)) {
+        return null;
       }
-      return value ?? "";
+      if (normalizedUrl) {
+        seenUrls.add(normalizedUrl);
+      }
+
+      return SHEET_COLUMNS.map((key) => {
+        if (key === "articleUrl") {
+          return normalizedUrl || article.articleUrl || "";
+        }
+        const value = article[key];
+        if (key === "insights") {
+          return Array.isArray(value) ? value.join("\n") : value ?? "";
+        }
+        return value ?? "";
+      });
     })
-  );
+    .filter(Boolean);
 
   try {
     const sheets = await getSheetsClient();

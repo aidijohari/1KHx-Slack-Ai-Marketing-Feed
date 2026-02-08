@@ -5,11 +5,11 @@ import { WebClient } from "@slack/web-api";
 import { askGPT } from "./gpt/gptClient.js";
 import { config } from "./config.js";
 import RSSParser from "rss-parser";
-import axios from "axios";
 import { extract } from "@extractus/article-extractor";
 import { parseISO, differenceInDays } from "date-fns";
 import { htmlToText } from 'html-to-text';
 import { fetchPostedArticles, appendPostedArticles } from "./utils/sheets.js";
+import fs from "fs";
 
 const slackToken = config.slack.token;
 const channelId = config.slack.channelId;
@@ -39,6 +39,9 @@ export async function fetchFeeds(feedUrls, maxArticles = null) {
 
   const feedsToProcess = shuffleArray(feedUrls);
 
+  const perFeedLimit = maxArticles && feedUrls.length ? Math.max(1, Math.ceil(maxArticles / feedUrls.length)) : null;
+  const perFeedCounts = new Map();
+
   for (const url of feedsToProcess) {
     try {
       const feed = await parser.parseURL(url);
@@ -49,6 +52,11 @@ export async function fetchFeeds(feedUrls, maxArticles = null) {
 
         // Only process recent items with links
         if (!item.link) continue;
+
+        if (perFeedLimit) {
+          const count = perFeedCounts.get(url) || 0;
+          if (count >= perFeedLimit) break;
+        }
 
         try {
           const extraction = await extract(item.link);
@@ -69,13 +77,17 @@ export async function fetchFeeds(feedUrls, maxArticles = null) {
               wordwrap: true,
             }),
             // extraction.content, // full text content (HTML stripped)
-            articleImageUrl: extraction.image || null,
-          });
+              articleImageUrl: extraction.image || null,
+            });
 
-          // Stop if we've reached the limit
-          if (maxArticles && allArticles.length >= maxArticles) {
-            return allArticles;
-          }
+            if (perFeedLimit) {
+              perFeedCounts.set(url, (perFeedCounts.get(url) || 0) + 1);
+            }
+
+            // Stop if we've reached the limit
+            if (maxArticles && allArticles.length >= maxArticles) {
+              return allArticles;
+            }
         } catch (err) {
           console.warn(`❌ Failed to extract ${item.link}: ${err.message}`);
         }
@@ -155,20 +167,22 @@ Your task:
 - Prefer globally relevant content, but give a modest boost to APAC-related articles (AU/NZ/SG/HK/JP/KR/IN).
 - Exclude region specific news that are outside of APAC (e.g. US political ads regulation, 'Search Central Live is coming back to South America').
 
-### Scoring rubric:
-Each article is scored as follows (more recent = higher recency score):
-- Relevance to brief themes: 0-12
-- Impact for marketers: 0-12
-- Source quality: 0-9
-- Recency: 0-9
-- APAC relevance bonus: +3 if applicable
+### Scoring rubric (0-42 total + up to +3 APAC bonus):
+Each article is scored as follows (keep top scores rare and justify briefly):
+- Relevance to brief themes: 0-12 (12 only if tightly on-core topics with depth; 9-11 strong; 6-8 solid; 3-5 partial; 1-2 weak; 0 off-brief)
+- Impact for marketers: 0-12 (12 only if it shifts strategy/budget/roadmaps; 9-11 strong, actionable implications; 6-8 useful but limited; 3-5 minor/tactical; 1-2 trivial; 0 none)
+- Source quality: 0-9 (9 top-tier/original/first-party data; 6-8 reputable industry outlet; 3-5 thin/aggregated/PR-heavy; 1-2 unknown/low-signal; 0 untrusted)
+- Recency: 0-9 (0-7 days = 9; 8-21 = 6; 22-60 = 3; older = 0)
+- APAC relevance bonus: +0 to +3 (0 none; 1 light tie; 2 clear APAC focus; 3 strongly centered on APAC)
+
+score_total = relevance + impact + source + recency (+ APAC bonus if any). Totals ≥35 should be rare and only when all dimensions are truly strong.
 
 ### Output generation:
 For the top 3 articles:
 - Generate a **Key Takeaway** (1-2 sentences summarizing the main insight). 
 - Generate **Why it matters** (1 short paragraph for marketers).
 - Generated **Key Takeaway** and **Why it matters** should be of roughly equal length, with **Key Takeway** allowed to be slightly longer if needed.
-- Generate **Insights** (3-5 bullet points of specific learnings or implications). Do not always use 5 points if fewer are sufficient.
+- Generate **Insights** (3-5 bullet points of specific learnings or implications). Using 5 points is not mandatory; use your judgment based on article depth. Use fewer points when appropriate.
 - Generate **Why it matters for 1000heads** (1 short paragraph contextualized to 1000heads' marketing and innovation focus).
 - Emphasis words by wrapping them in * for bold, and _ for italics. Always add emphases where you think appropriate to make the text more engaging and readable.
 - Emphasis numbers and statistics by wrapping them in \` for code style.
@@ -190,7 +204,7 @@ For the top 3 articles:
     "score_source": "<score for source quality>",
     "score_recency": "<score for recency>",
     "score_apac": "<score for APAC relevance bonus>",
-    "score_total": "<total scoring /16 +1 from bonus if applicable>",
+    "score_total": "<total scoring = sum of components out of /42 +3 from bonus if applicable>",
     "keyTakeaway": "<generated takeaway from the article chosen>",
     "insights": [
       "<generated insight from article chosen #1>",
@@ -245,13 +259,24 @@ const normalizeUrl = (url) =>
 
 async function run() {
   try {
-    const postedUrls = await fetchPostedArticles();
-    const feeds = await fetchFeeds(config.feeds, 100);
+    let dedupeEnabled = true;
+    let postedUrls = new Set();
+
+    const credsPath = config.google.credentialsPath;
+    if (!credsPath || !fs.existsSync(credsPath)) {
+      dedupeEnabled = false;
+      console.warn("Sheets credentials missing or unreadable; skipping dedupe this run.");
+      await notifyErrors("Sheets credentials missing or unreadable; skipping dedupe this run.");
+    } else {
+      postedUrls = await fetchPostedArticles();
+    }
+
+    const feeds = await fetchFeeds(config.feeds, 20);
 
     const freshArticles = [];
     for (const article of feeds) {
       const urlKey = normalizeUrl(article.articleUrl);
-      if (urlKey && postedUrls.has(urlKey)) {
+      if (dedupeEnabled && urlKey && postedUrls.has(urlKey)) {
         console.log("Dedupe hit; skipping already-posted article:", article.articleTitle || article.articleUrl);
         continue;
       }
@@ -267,13 +292,25 @@ async function run() {
     const gptResponse = await askGPT(prompt);
     console.log("GPT response received");
 
-    const articles = JSON.parse(gptResponse);
+    const parsed = JSON.parse(gptResponse);
+    const articles = Array.isArray(parsed) ? parsed : [];
+    if (!articles.length) {
+      console.warn("GPT returned no parsable articles; aborting post.");
+      await notifyErrors("GPT returned no parsable articles; aborting post.");
+      return;
+    }
+
+    const isValidArticle = (a) => a && typeof a.articleUrl === "string" && a.articleUrl.trim() && typeof a.articleTitle === "string" && a.articleTitle.trim();
 
     for (let i = 0; i < articles.length; i++) {
       const article = articles[i];
+      if (!isValidArticle(article)) {
+        console.warn("Invalid article payload; skipping", article);
+        continue;
+      }
       const urlKey = normalizeUrl(article.articleUrl);
 
-      if (urlKey && postedUrls.has(urlKey)) {
+      if (dedupeEnabled && urlKey && postedUrls.has(urlKey)) {
         console.log("Skipping already-posted article: ", article.articleTitle || article.articleUrl);
         continue;
       }

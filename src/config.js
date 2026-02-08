@@ -50,19 +50,21 @@ const FEED = [
   "https://the-media-leader.com/feed/",
   "https://blog.chartmogul.com/feed/",
   "https://feeds.feedburner.com/blogspot/amDG",
-  // Added (deduped)
+  // Added after
   "https://www.socialmediatoday.com/feeds/news/",
   "https://restofworld.org/feed/latest",
   "https://www.itsnicethat.com/?nicefeed=",
   "https://www.creativeboom.com/feed/",
-  "https://designtaxi.com/news.rss",
+  // "https://designtaxi.com/news.rss", // possibly blocked 403
+  "https://www.digitalartsonline.co.uk/news/feed/",
+  "https://www.adweek.com/category/creative/feed/",
   "https://stratechery.com/feed/",
   "https://fs.blog/feed/",
   "https://www.brandinginasia.com/feed/",
 ];
 
 //GPT SETTINGS
-const GPT_MODEL = "gpt-5";
+const GPT_MODEL = "gpt-4o";
 
 // BOT SETTINGS
 const POSTS_PER_CYCLE = 3;
