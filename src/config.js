@@ -1,3 +1,18 @@
+// ------------- CONFIG ------------------ //
+//GPT SETTINGS
+const GPT_MODEL = "gpt-5";
+
+// BOT SETTINGS
+const POSTS_PER_CYCLE = 1;
+const DELAY = 1000 * 60 * 0.5; // 30 seconds
+const LOOKBACK_WINDOW = 60; // 60 days
+const MAX_ARTICLES = 40; // max articles to fetch per run
+
+// SLACK BOT CONFIG
+const SLACK_BOT_NAME = "1Khx 🤖";
+const POST_REACTIONS = ["thumbsup" /*👍*/, "eyes" /*👀*/, "no_entry" /*⛔️*/];
+
+// -------------------------------------- //
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -24,7 +39,7 @@ const FEED = [
   "https://www.adexchanger.com/feed/",
   "https://www.exchangewire.com/feed/",
   "https://martechseries.com/feed/",
-  "https://customerthink.com/feed/",
+  // "https://customerthink.com/feed/" // blocked 403,
   "https://www.marketingtechnews.net/feed/",
   "https://mobilemarketingmagazine.com/feed/",
   "https://influencermarketinghub.com/feed/",
@@ -63,23 +78,12 @@ const FEED = [
   "https://www.brandinginasia.com/feed/",
 ];
 
-//GPT SETTINGS
-const GPT_MODEL = "gpt-4o";
-
-// BOT SETTINGS
-const POSTS_PER_CYCLE = 3;
-const DELAY = 1000 * 60 * 0.5; // 30 seconds
-const LOOKBACK_WINDOW = 60; // 60 days
-
-// SLACK BOT CONFIG
-const SLACK_BOT_NAME = "1Khx 🚀";
-const POST_REACTIONS = ["🚀", "🤔", "👎"];
-
 export const config = {
   settings: {
     posts: POSTS_PER_CYCLE,
     delay: DELAY,
-    lookback_window: LOOKBACK_WINDOW
+    lookback_window: LOOKBACK_WINDOW,
+    max_articles_per_run: MAX_ARTICLES,
   },
   slack: {
     token: process.env.SLACK_BOT_TOKEN,

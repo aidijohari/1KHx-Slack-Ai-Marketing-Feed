@@ -9,6 +9,7 @@ import { extract } from "@extractus/article-extractor";
 import { parseISO, differenceInDays } from "date-fns";
 import { htmlToText } from 'html-to-text';
 import { fetchPostedArticles, appendPostedArticles } from "./utils/sheets.js";
+import { DateTime } from "luxon";
 import fs from "fs";
 
 const slackToken = config.slack.token;
@@ -38,11 +39,13 @@ export async function fetchFeeds(feedUrls, maxArticles = null) {
   };
 
   const feedsToProcess = shuffleArray(feedUrls);
+  const blockedFeeds = new Set();
 
   const perFeedLimit = maxArticles && feedUrls.length ? Math.max(1, Math.ceil(maxArticles / feedUrls.length)) : null;
   const perFeedCounts = new Map();
 
   for (const url of feedsToProcess) {
+    if (blockedFeeds.has(url)) continue;
     try {
       const feed = await parser.parseURL(url);
       const items = shuffleArray(feed.items || []);
@@ -77,18 +80,24 @@ export async function fetchFeeds(feedUrls, maxArticles = null) {
               wordwrap: true,
             }),
             // extraction.content, // full text content (HTML stripped)
-              articleImageUrl: extraction.image || null,
-            });
+            articleImageUrl: extraction.image || null,
+          });
 
-            if (perFeedLimit) {
-              perFeedCounts.set(url, (perFeedCounts.get(url) || 0) + 1);
-            }
+          if (perFeedLimit) {
+            perFeedCounts.set(url, (perFeedCounts.get(url) || 0) + 1);
+          }
 
-            // Stop if we've reached the limit
-            if (maxArticles && allArticles.length >= maxArticles) {
-              return allArticles;
-            }
+          // Stop if we've reached the limit
+          if (maxArticles && allArticles.length >= maxArticles) {
+            return allArticles;
+          }
         } catch (err) {
+          const msg = String(err?.message || "");
+          if (msg.includes("403")) {
+            console.warn(`❌ 403 on ${item.link}; \n  > marking feed blocked and skipping remaining items`);
+            blockedFeeds.add(url);
+            break;
+          }
           console.warn(`❌ Failed to extract ${item.link}: ${err.message}`);
         }
       }
@@ -100,20 +109,20 @@ export async function fetchFeeds(feedUrls, maxArticles = null) {
   return allArticles;
 }
 
-export function filterRecentEnglish(articles) {
-  return articles.filter(a => {
-    const daysAgo = differenceInDays(new Date(), parseISO(a.articlePublishedDate || new Date()));
-    const isEnglish = /^[\x00-\x7F]*$/.test(a.articleContent || "");
-    return daysAgo <= config.settings.lookback_window && isEnglish;
-  });
-}
+// export function filterRecentEnglish(articles) {
+//   return articles.filter(a => {
+//     const daysAgo = differenceInDays(new Date(), parseISO(a.articlePublishedDate || new Date()));
+//     const isEnglish = /^[\x00-\x7F]*$/.test(a.articleContent || "");
+//     return daysAgo <= config.settings.lookback_window && isEnglish;
+//   });
+// }
 
-function prepareArticlesForGPT(articles, maxChars = 3000) {
-  return articles.map(a => ({
-    ...a,
-    articleContent: a.articleContent.slice(0, maxChars),
-  }));
-}
+// function prepareArticlesForGPT(articles, maxChars = 3000) {
+//   return articles.map(a => ({
+//     ...a,
+//     articleContent: a.articleContent.slice(0, maxChars),
+//   }));
+// }
 
 async function notifyErrors(errorText) {
   if (!Array.isArray(errorRecipients) || errorRecipients.length === 0) {
@@ -141,8 +150,9 @@ You are an expert marketing news curator. You will be given a list of articles i
 
 Your task:
 1. Evaluate each article based on the criteria below.
-2. Select the top 3 highest-scoring articles.
-3. Return the results in strict JSON format (no extra text).
+2. Select the single highest-scoring article (top 1).
+3. Return the result in strict JSON format (no extra text).
+4. If any of the articles provided contain potential sensitive or proprietary data or does not comply with usage policies, please exclude them from selection and move to the next article.
 
 ### Criteria for article selection:
 - Articles must be published within the last 60 days.
@@ -178,7 +188,7 @@ Each article is scored as follows (keep top scores rare and justify briefly):
 score_total = relevance + impact + source + recency (+ APAC bonus if any). Totals ≥35 should be rare and only when all dimensions are truly strong.
 
 ### Output generation:
-For the top 3 articles:
+For the top article:
 - Generate a **Key Takeaway** (1-2 sentences summarizing the main insight). 
 - Generate **Why it matters** (1 short paragraph for marketers).
 - Generated **Key Takeaway** and **Why it matters** should be of roughly equal length, with **Key Takeway** allowed to be slightly longer if needed.
@@ -186,6 +196,11 @@ For the top 3 articles:
 - Generate **Why it matters for 1000heads** (1 short paragraph contextualized to 1000heads' marketing and innovation focus).
 - Emphasis words by wrapping them in * for bold, and _ for italics. Always add emphases where you think appropriate to make the text more engaging and readable.
 - Emphasis numbers and statistics by wrapping them in \` for code style.
+- The JSON must parse with JSON.parse() without errors.
+- The ONLY allowed backslashes in the entire output are those required by JSON escaping:
+   - \" to escape a quote inside a string
+   - \\ to represent a literal backslash
+   - \\n \\r \\t \\b \\f or \\uXXXX for control characters (only if needed)
 
 ### Return format (STRICT JSON only):
 [
@@ -218,35 +233,11 @@ For the top 3 articles:
   }
 ]
 
+Return ONLY a JSON array (no enclosing object, no "results" property).
+
 Articles are as below:
 ${articlesJson}
 `;
-
-// async function formatSlackMessage(gptResponse) {
-//   const [a] = JSON.parse(gptResponse);
-
-//   const url = String(a.articleUrl ?? "")
-//   .replace(/\u200B/g, "")   // zero-width space (common in LLM output)
-//   .trim();
-
-//   const formattedMessage = [
-//     `*${a.articleTitle}* by ${a.articlePublisher}`,
-//     url,
-//     "",
-//     `*Key Takeaway*:`,
-//     a.keyTakeaway,
-//     "",
-//     `*Insights*:`,
-//     ...(a.insights ?? []).map(insight => `• ${insight}`),
-//     "",
-//     `*Why it matters*: ${a.whyItMatters}`,
-//     "",
-//     `*Why it matters for 1000heads*: ${a.whyItMattersFor1000heads}`,
-//   ].join("\n");
-
-//   return formattedMessage;
-// }
-
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -258,6 +249,7 @@ const normalizeUrl = (url) =>
     .toLowerCase();
 
 async function run() {
+  let hasError = false;
   try {
     let dedupeEnabled = true;
     let postedUrls = new Set();
@@ -271,13 +263,13 @@ async function run() {
       postedUrls = await fetchPostedArticles();
     }
 
-    const feeds = await fetchFeeds(config.feeds, 20);
+    const feeds = await fetchFeeds(config.feeds, config.settings.max_articles_per_run);
 
     const freshArticles = [];
     for (const article of feeds) {
       const urlKey = normalizeUrl(article.articleUrl);
       if (dedupeEnabled && urlKey && postedUrls.has(urlKey)) {
-        console.log("Dedupe hit; skipping already-posted article:", article.articleTitle || article.articleUrl);
+        console.log("🔁 Dedupe hit; skipping already-posted article:", article.articleTitle || article.articleUrl);
         continue;
       }
       freshArticles.push(article);
@@ -291,19 +283,26 @@ async function run() {
     const prompt = buildPrompt(JSON.stringify(freshArticles, null, 2));
     const gptResponse = await askGPT(prompt);
     console.log("GPT response received");
+    console.log(gptResponse);
 
     const parsed = JSON.parse(gptResponse);
-    const articles = Array.isArray(parsed) ? parsed : [];
+    const articles = Array.isArray(parsed)
+      ? parsed
+      : (parsed && Array.isArray(parsed.results)
+          ? parsed.results
+          : (parsed && Array.isArray(parsed.articles) ? parsed.articles : []));
     if (!articles.length) {
       console.warn("GPT returned no parsable articles; aborting post.");
       await notifyErrors("GPT returned no parsable articles; aborting post.");
       return;
     }
 
+    const articlesToPost = articles.slice(0, 1);
+
     const isValidArticle = (a) => a && typeof a.articleUrl === "string" && a.articleUrl.trim() && typeof a.articleTitle === "string" && a.articleTitle.trim();
 
-    for (let i = 0; i < articles.length; i++) {
-      const article = articles[i];
+    for (let i = 0; i < articlesToPost.length; i++) {
+      const article = articlesToPost[i];
       if (!isValidArticle(article)) {
         console.warn("Invalid article payload; skipping", article);
         continue;
@@ -316,9 +315,16 @@ async function run() {
       }
 
       const res = await postToSlack(article);
-      const postedDate = res?.ts
-        ? new Date(Number(String(res.ts).split(".")[0]) * 1000).toISOString()
-        : new Date().toISOString();
+      const postedDate = (() => {
+        const zone = "Asia/Kuala_Lumpur";
+        if (res?.ts) {
+          const seconds = Number(String(res.ts).split(".")[0]);
+          if (Number.isFinite(seconds)) {
+            return DateTime.fromSeconds(seconds, { zone }).toISO();
+          }
+        }
+        return DateTime.now().setZone(zone).toISO();
+      })();
 
       await appendPostedArticles([
         {
@@ -337,9 +343,12 @@ async function run() {
       }
     }
   } catch (err) {
+    hasError = true;
     console.error("Error in run function: ", err);
     await notifyErrors(`Error in run function: ${err.message}`);
   }
+
+  return hasError ? 1 : 0;
 }
 
 async function postToSlack(a) {
@@ -349,7 +358,20 @@ async function postToSlack(a) {
   const ts = iso ? Math.floor(new Date(iso).getTime() / 1000) : null;
   const slackDate = ts ? `<!date^${ts}^{date_short} {time}|${iso}>` : "—";
 
-  const presetReactions = ["thumbsup", "no_entry", "eyes"];
+  const isUsableImage = (url) => {
+    const u = String(url || "").trim();
+    if (!u.startsWith("http")) return false;
+    if (u.toLowerCase().endsWith(".svg")) return false; // Slack often rejects svg
+    return true;
+  };
+
+  const toReactionName = (val) => {
+    const v = String(val || "").trim();
+    if (!v) return null;
+    const stripped = v.startsWith(":") && v.endsWith(":") ? v.slice(1, -1) : v;
+    if (/\s/.test(stripped)) return null;
+    return stripped;
+  };
 
   // Header must be plain_text + <= 150 chars
   const title = String(a.articleTitle ?? "Untitled").replace(/\u200B/g, "").trim().slice(0, 150);
@@ -364,7 +386,7 @@ async function postToSlack(a) {
     ? insightsArr.map(i => `• ${String(i).trim()}`).join("\n")
     : "—";
 
-  const imageUrl = String(a.articleImageUrl ?? "").trim();
+  const imageUrl = isUsableImage(a.articleImageUrl) ? String(a.articleImageUrl).trim() : "";
 
   try {
     const blocks = [
@@ -415,28 +437,42 @@ async function postToSlack(a) {
       }
     );
 
-    const res = await slackClient.chat.postMessage({
-      channel: channelId,
-      text: title,          // keep fallback text
-      blocks,
-      unfurl_links: false,
-      unfurl_media: false
-    });
+    const sendMessage = async (useBlocks) =>
+      slackClient.chat.postMessage({
+        channel: channelId,
+        text: title,          // keep fallback text
+        blocks: useBlocks,
+        unfurl_links: false,
+        unfurl_media: false,
+        username: config.slack.botName,
+      });
 
-    // Add preset reactions
-    const results = await Promise.allSettled(
-      presetReactions.map(name =>
-        slackClient.reactions.add({
+    let res;
+    try {
+      res = await sendMessage(blocks);
+    } catch (err) {
+      const errMsg = String(err?.data?.error || err?.message || "");
+      const invalidBlocks = errMsg.includes("invalid_blocks") || errMsg.includes("image_url");
+      if (imageUrl && invalidBlocks) {
+        console.warn("Image block failed; retrying without image", err?.data ?? err);
+        const blocksNoImage = blocks.filter(b => b.type !== "image");
+        res = await sendMessage(blocksNoImage);
+      } else {
+        throw err;
+      }
+    }
+
+    // Add preset reactions in order
+    for (const name of config.slack.postReactions) {
+      try {
+        await slackClient.reactions.add({
           channel: res.channel,
           timestamp: res.ts,
-          name
-        })
-      )
-    );
-
-    for (const r of results) {
-      if (r.status === "rejected") {
-        console.warn("Reaction add failed:", r.reason?.data ?? r.reason);
+          name,
+          username: config.slack.botName,
+        });
+      } catch (err) {
+        console.warn("Reaction add failed:", err?.data ?? err);
       }
     }
 
@@ -447,7 +483,8 @@ async function postToSlack(a) {
         thread_ts: res.ts,
         text: threadText,
         unfurl_links: false,
-        unfurl_media: false
+        unfurl_media: false,
+        username: config.slack.botName,
       });
     } catch (threadErr) {
       console.warn("Thread post failed:", threadErr?.data ?? threadErr);
@@ -462,6 +499,6 @@ async function postToSlack(a) {
   }
 }
 
-run();
-
-// const json = await analyzeArticles(prepared);
+const exitCode = await run();
+// Force deterministic shutdown for cron/lock-file workflows.
+process.exit(exitCode);
