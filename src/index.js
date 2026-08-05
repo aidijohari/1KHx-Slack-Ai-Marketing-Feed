@@ -146,7 +146,7 @@ async function notifyErrors(errorText) {
 }
 
 const buildPrompt = (articlesJson) => `
-You are an expert marketing news curator. You will be given a list of articles in JSON format. Look at the object allArticles.content and select the top 3 highest-scoring articles.
+You are an expert marketing news curator. You will be given a list of articles in JSON format. Look at the object allArticles.content and select the top 1 highest-scoring articles.
 
 Your task:
 1. Evaluate each article based on the criteria below.
@@ -233,11 +233,44 @@ For the top article:
   }
 ]
 
-Return ONLY a JSON array (no enclosing object, no "results" property).
+Return ONLY a JSON object with a single key "articles" containing the array (e.g. { "articles": [...] }).
 
 Articles are as below:
 ${articlesJson}
 `;
+
+// GPT sometimes writes an extra zero into unicode escapes for ASCII punctuation:
+// it emits \u00027 instead of \u0027 (') and \u0002d instead of \u002d (-).
+// That parses as a C0 control char followed by a stray literal digit, so the
+// JSON is valid and only the rendered text is wrong ("won't" -> "won7t").
+// Shift the digits back into the escape. \u000X is always a control character,
+// which never legitimately appears in article copy, so this is safe to always run.
+const repairShiftedUnicodeEscapes = (s) =>
+  s.replace(/\\u000([0-9a-fA-F])([0-9a-fA-F])/g, "\\u00$1$2");
+
+const sanitizeJsonString = (raw) => {
+  let s = raw.trim();
+  // Strip markdown code fences
+  s = s.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "");
+  s = repairShiftedUnicodeEscapes(s);
+  return s;
+};
+
+const parseGptJson = (raw) => {
+  const s = sanitizeJsonString(raw);
+  try {
+    return JSON.parse(s);
+  } catch (err) {
+    // Last resort only: drop illegal backslash escapes, keeping valid JSON ones.
+    // Lossy (it also unescapes legitimate "\\" pairs), so never run on valid JSON.
+    console.warn("GPT JSON invalid; retrying with backslash repair:", err.message);
+    return JSON.parse(s.replace(/\\(?!["\\/bfnrtu])/g, ""));
+  }
+};
+
+// Strip control characters that survive parsing; keep tab and newline.
+const stripControlChars = (value) =>
+  String(value ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u200B]/g, "");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -285,7 +318,7 @@ async function run() {
     console.log("GPT response received");
     console.log(gptResponse);
 
-    const parsed = JSON.parse(gptResponse);
+    const parsed = parseGptJson(gptResponse);
     const articles = Array.isArray(parsed)
       ? parsed
       : (parsed && Array.isArray(parsed.results)
@@ -374,16 +407,16 @@ async function postToSlack(a) {
   };
 
   // Header must be plain_text + <= 150 chars
-  const title = String(a.articleTitle ?? "Untitled").replace(/\u200B/g, "").trim().slice(0, 150);
+  const title = stripControlChars(a.articleTitle ?? "Untitled").trim().slice(0, 150);
 
   // Keep fields within reason; Slack has per-block and per-field text limits
-  const keyTakeaway = String(a.keyTakeaway ?? "—").trim();
-  const whyItMatters = String(a.whyItMatters ?? "—").trim();
-  const whyFor1k = String(a.whyItMattersFor1000heads ?? "—").trim();
+  const keyTakeaway = stripControlChars(a.keyTakeaway ?? "—").trim();
+  const whyItMatters = stripControlChars(a.whyItMatters ?? "—").trim();
+  const whyFor1k = stripControlChars(a.whyItMattersFor1000heads ?? "—").trim();
 
   const insightsArr = Array.isArray(a.insights) ? a.insights : [];
   const insightsText = insightsArr.length
-    ? insightsArr.map(i => `• ${String(i).trim()}`).join("\n")
+    ? insightsArr.map(i => `• ${stripControlChars(i).trim()}`).join("\n")
     : "—";
 
   const imageUrl = isUsableImage(a.articleImageUrl) ? String(a.articleImageUrl).trim() : "";
